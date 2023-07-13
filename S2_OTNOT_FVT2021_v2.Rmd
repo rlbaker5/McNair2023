@@ -1,0 +1,273 @@
+
+---
+title: "McNair2023"
+author: "Robert L. Baker"
+email: "rlbaker5@gmail.com"
+affiliation: "https://rlbakerlab.com"
+date: "07/13/2023"
+abstract: "This document includes an example dataset, code for fitting a logistic growth curve to FVT, generating plots, and then analyzing the data using a parameters as data approach."
+tags: [R, FVT, Brassica, AJB, Function-Valued Trait, American Journal of Botany, Development, High throughput phenotyping, HTP]
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+r<-getOption("repos")
+r["CRAN"]<-"https://cloud.r-project.org"
+options(repos= r)
+
+if(!require(ply)){
+  install.packages("plyr", dependencies=TRUE)
+}
+if(!require(lubridate)){
+  install.packages("lubridate", dependencies=TRUE)
+}
+```
+
+## Data Background and Explanation
+
+These data were generated at the CEPF at Purdue University in 2020 as part of a larger experiment. Here we analyze a subset of the data from two genotypes of <em>Brassica rapa</em> (L58 & R500) in a single control treatment and the single response variable "TopPlantSurface". Plants were grown in a consistent, growth chamber environment and watering was automated. Each weekday, plants exited the growth chamber on an automated conveyor belt and passed through an array of phenotyping equipment. Data analyzed here are from a camera aimed directly down at the center of each pot. TopPlantSurface is generated from RGB image data and is extracted from the image using custom software specific to the CEPF (but remarkably reminiscent of openCV or PlantCV). TopPlantSurface consists of all the pixels identified as "Plant" from this overhead view and is a likely proxy for plant growth, photosynthetic area, biomass, etc. Also note that these are not raw data; obviously erroneous data points have been dropped. For instance, on one day the watering regime was off and the plants wilted, leading to abnormally small values for "TopPlantSurface". One replicate appeared to be mislabeled and was also dropped from the analysis outlined below.
+
+#### Prep for analysis:
+```{r startup, results="hide", message=FALSE}
+rm(list=ls()) #remove all objects from the R environment 
+gc() #can help return memory to R after large objects have been called.
+
+#load necessary packages
+library(plyr) 
+library(lubridate)
+library(car)
+library(tidyverse) 
+
+# load the data - here, I happen to know that the first two lines are junk so I don't load them with skip = 2.
+# if yo don't include the skip=2 component, this will take a LONG time to load.
+dat <- read.csv(file="PlantSurfaces.csv", skip = 2)
+```
+
+#### Data cleaning
+
+# Notice the object "dat" in the Environment tab says it has 127 observations and 16,384 variables. That seems off. I happen to know there are a lot fewer variables.  Let's poke around and see what happened:
+
+```{r data_cleaning, eval=FALSE}
+# one of the first things I do is look at the first 6 lines of the data:
+head(dat) 
+
+# you can also get an idea of the structure of the data
+str(dat)
+
+#and since the columns seem to be the issue, look at the column names
+colnames(dat)
+
+#all of that was a bit too much information to digest, so look at just the first 15 columns
+colnames(dat)[1:15] # now we are getting somewhere!
+```
+
+# So we can make a new R object with just the first 7 variables (columns) and work with that
+```{r new_dataframe}
+# use the brackets to access part of the data frame in the format [rows, columns]. Notice that I don't specify any rows by leaving that blank, so R uses all the rows. I specify only the first 7 columns, so R selects just those
+dat2 <- dat[,c(1:7)] 
+
+# Now this is more like it!
+head(dat2) 
+```
+
+
+
+#### Convert data collection date from mm/dd/yy to "days from planting". 
+```{r dateconversions}
+#convert date formats from mm/dd/yy to Julian days:
+dat2$PlantDate<-as.Date(dat2$PlantDate, format="%m/%d/%Y")
+dat2$PlantDate<-format(dat2$PlantDate, "%j")
+dat2$PlantDate<-as.numeric(dat2$PlantDate)
+
+dat2$DataDate<-as.Date(dat2$DataDate, format="%m/%d/%Y")
+dat2$DataDate<-format(dat2$DataDate, "%j")
+dat2$DataDate<-as.numeric(dat2$DataDate)
+
+#generate a new column, "DataDate", which is the time between planting and the observation, in days
+dat2$DataDate<-dat2$DataDate-dat2$PlantDate
+
+#take a look at the data again:
+head(dat2) 
+```
+
+#### Visual data inspection:
+```{r plot_raw_data}
+#dat$DataDate<-as.factor(dat$DataDate) #convert to factor
+
+#get max and min values to set y-axis limits on plots:
+min(dat2$TopPlantSurface, na.rm=TRUE) #minimum value 
+max(dat2$TopPlantSurface, na.rm=TRUE) #maximum value
+
+dat_split<-split(dat2, dat2$PlantID) #split the dataframe into multiple dataframes, one for each individual plant (PlantID) and place all of these dataframes in a list of dataframes.
+
+j<-unique(dat2$PlantID) #j is a list of all the individual plant IDs
+length(j) # the number of plants in the analysis
+```
+
+```{r plot data}
+plot(NULL, xlim=c(0,48), ylim=c(0,125089), ylab="TopSurface (pixels)", xlab="Days after Planting", main="Plant size during development") #set up an empty plot
+
+#generate a plot where each color is a different plant for data inspection purposes:
+for(i in 1:length(j)){
+	yvalues<-dat_split[[i]][7]
+	y2values<-yvalues$TopPlantSurface
+	xvalues<-dat_split[[i]][6]
+	x2values<-xvalues$DataDate
+	main<-dat_split[[i]][1]
+	geno<-dat_split[[i]][2]
+	
+	points(x2values,y2values, pch=19, col=i)
+}
+```
+
+#### Fit a logistic growth curve to a single plant
+Once you are satisfied that your data can be fit with a specific function, in this case a logistic growth curve, you can fit the curve to the data. First, test this out the curve fitting procedure with an individual plant:
+```{r logit_tester, message=FALSE}
+#Grab just one plant:
+tester<-dat_split[[2]]
+head(tester)
+
+#plot it just to make sure:
+plot(tester$DataDate, tester$TopPlantSurface)
+
+#fit a self-starting logistic growth model using non-linear regression. 
+plant.ss<-nls(TopPlantSurface ~ SSlogis(DataDate, phi1, phi2, phi3), data=tester)
+#phi1: upper asymptote
+#phi2: value of x where y=0.5*phi1 (inflection point)
+#phi3: rate parameter
+
+#model summary:
+summary(plant.ss)
+```
+
+
+```{r do them all}
+#write a function to do the logistic growth curve model fits:
+log.fit<-function(TopPlantSurface, DataDate, tester){
+
+y<-tester[,"TopPlantSurface"]
+x<-tester[,"DataDate"]
+
+log.ss<-nls(y~SSlogis(x, phi1, ph2, phi3))
+
+A<-summary(log.ss)$coef[1] #phi1: upper asymptote
+I<-summary(log.ss)$coef[2] #phi2: value of x where y=0.5*phi1 (inflection point)
+r<-summary(log.ss)$coef[3] #phi3: rate parameter
+
+plot(y~x, main="logistic function", xlab="Days Since Planting", ylab="TopPlantSurface (pixels)")
+lines(0:max(x), predict(log.ss, data.frame(x=0:max(x))), col="red")
+
+out<-data.frame(cbind(c(Asymptoe=A, Inflection=I, rate=r)))
+names(out)[1]<-"Logistic Curve"
+
+return(out)
+}
+
+log.fit(TopPlantsurface, DataDate, tester)
+
+```
+
+# This is a good stopping place
+
+#### Calculate and plot logistic growth curves for all individual plants
+Also, extract parameters describing the logistic growth curve for each plant
+```{r do_them_all, message=FALSE}
+#Set up some empty lists
+ID<-NULL
+Geno<-NULL
+Max<-NULL
+Infl<-NULL
+Growth<-NULL
+
+#Set up a plot
+	plot(1, type="n", xlim=c(9,43), ylim=c(0,120000), main="TopPlantSurface", ylab="TopPlantSurface (pixels)", xlab="Days since Planting")
+	legend(x="topleft", title="Genotype", legend=c("L58 (open circles)", "R500 (filled circles)"),
+       pch=21, col=c("cyan", "black"), pt.bg=c("white", "magenta"))
+
+	for(i in 1:length(j)){
+		tester<-dat_split[[i]]
+		y<-tester[,"TopPlantSurface"]
+		x<-tester[,"DataDate"]
+	
+	  #fit logistic growth curves to each L58 plant, individually:	
+	  if(tester[2,2]=="L58"){
+		  log.ss<-nls(y~SSlogis(x, phi1, phi2, phi3))
+	
+		  #extract parameters & confidence intervals
+		  max<-stats::confint(log.ss)[[1]]
+		  infl<-stats::confint(log.ss)[[2]]
+		  growth<-stats::confint(log.ss)[[3]]
+	
+		  #plot L58 genotypes (open circles):
+		  points(y~x, pch=21, col=i)
+		  lines(0:45, predict(log.ss, data.frame(x=0:45)), col=i)
+		  }
+	
+	  #fit logistic growth curves to each R500 plant, individually:
+	  if(tester[2,2]=="R500"){
+		  log.ss<-nls(y~SSlogis(x, phi1, ph2, ph3))
+	
+		  max<-stats::confint(log.ss)[[1]]
+		  infl<-stats::confint(log.ss)[[2]]
+		  growth<-stats::confint(log.ss)[[3]]
+		
+		  #plot R500 genotypes (closed circles):	
+		  points(y~x, pch=21, col="black", bg=i)
+		  lines(0:45, predict(log.ss, data.frame(x=0:45)), col=i)
+		  }
+		
+		geno<-tester$Genotype[1]
+		ID<-c(ID,tester[1,1])
+		Geno<-c(Geno,geno)
+		Max<-c(Max,max)
+		Infl<-c(Infl, infl)
+		Growth<-c(Growth, growth)
+  }
+```
+
+#### Satisfied with the fits, time to work with downstream analyses:
+Using a "parameters as data" approach.
+```{r downstream analyses}
+#dataframe of extracted logistic growth parameters
+
+out<-data.frame(cbind(ID, Geno, Max, Infl, Growth))
+out$Geno<-as.factor(out$Geno)
+
+#Basic linear models for each parameter:
+Maxmod<-lm(Max~Geno, data=out)
+summary(Maxmod)
+
+Inflmod<-lm(Infl~Geno, data=out)
+summary(Inflmod)
+
+Growthmod<-lm(Growth~Geno, data=out)
+summary(Growthmod)
+
+```
+
+
+#### Documentation and citations:
+```{r, citations, echo=FALSE}
+cite<-citation()[1]
+print(cite, bibtex=FALSE)
+shortRversion <- function() {
+   rvs <- R.version.string
+   if(grepl("devel", (st <- R.version$status)))
+       rvs <- sub(paste0(" ",st," "), "-devel_", rvs, fixed=TRUE)
+   gsub("[()]", "", gsub(" ", "_", sub(" version ", "-", rvs)))
+}
+shortRversion()
+
+lub<-citation("lubridate")
+print(lub, bibtex=FALSE)
+car<-citation("car")
+print(car, bibtex=FALSE)
+plyr<-citation("plyr")
+print(plyr, bibtex=FALSE)
+tidy<-citation("tidyverse")
+print(tidy, bibtex=FALSE)
+```
+
+
+
